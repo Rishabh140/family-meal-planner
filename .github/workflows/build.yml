@@ -1,0 +1,402 @@
+name: Build Family Meal Planner APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Initialize Project & Lock Compatible Notification Version
+        run: |
+          flutter create --org com.family --project-name family_meal_planner .
+          flutter pub add "flutter_local_notifications:^17.2.4" timezone intl url_launcher shared_preferences
+
+      - name: Configure Android Manifest
+        run: |
+          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+              <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+
+              <application
+                  android:label="Family Meal Planner"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher">
+                  <receiver android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                      </intent-filter>
+                  </receiver>
+                  <receiver android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"
+                      android:exported="true" />
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                        android:name="io.flutter.embedding.android.NormalTheme"
+                        android:resource="@style/NormalTheme" />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+          </manifest>
+          EOF
+
+      - name: Write Compatible App Code
+        run: |
+          cat << 'EOF' > lib/main.dart
+          import 'dart:convert';
+          import 'package:flutter/material.dart';
+          import 'package:intl/intl.dart';
+          import 'package:shared_preferences/shared_preferences.dart';
+          import 'package:url_launcher/url_launcher.dart';
+          import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+          import 'package:timezone/data/latest_all.dart' as tz;
+          import 'package:timezone/timezone.dart' as tz;
+
+          final FlutterLocalNotificationsPlugin localNotifs = FlutterLocalNotificationsPlugin();
+
+          void main() async {
+            WidgetsFlutterBinding.ensureInitialized();
+            tz.initializeTimeZones();
+            tz.setLocalLocation(tz.getLocation('Asia/Kolkata'));
+
+            const AndroidInitializationSettings androidSettings =
+                AndroidInitializationSettings('@mipmap/ic_launcher');
+            const InitializationSettings initSettings =
+                InitializationSettings(android: androidSettings);
+
+            await localNotifs.initialize(initSettings);
+            await scheduleDailyMealReminders();
+
+            runApp(const FamilyMealPlannerApp());
+          }
+
+          Future<void> scheduleDailyMealReminders() async {
+            final androidImpl = localNotifs.resolvePlatformSpecificImplementation<
+                AndroidFlutterLocalNotificationsPlugin>();
+            if (androidImpl != null) {
+              await androidImpl.requestNotificationsPermission();
+              await androidImpl.requestExactAlarmsPermission();
+            }
+
+            const NotificationDetails notifDetails = NotificationDetails(
+              android: AndroidNotificationDetails(
+                'meal_reminders_id',
+                'Meal Reminders',
+                channelDescription: 'Daily 8:00 AM and 10:00 PM Meal Alarms',
+                importance: Importance.max,
+                priority: Priority.high,
+              ),
+            );
+
+            await localNotifs.zonedSchedule(
+              101,
+              'Breakfast Reminder (8:00 AM)',
+              'Remember to confirm if you want breakfast today!',
+              _nextInstanceOfTime(8, 0),
+              notifDetails,
+              androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+              uiLocalNotificationDateInterpretation:
+                  UILocalNotificationDateInterpretation.absoluteTime,
+              matchDateTimeComponents: DateTimeComponents.time,
+            );
+
+            await localNotifs.zonedSchedule(
+              102,
+              'Tiffin Reminder (10:00 PM)',
+              'Confirm your tiffin preference for tomorrow before bedtime!',
+              _nextInstanceOfTime(22, 0),
+              notifDetails,
+              androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+              uiLocalNotificationDateInterpretation:
+                  UILocalNotificationDateInterpretation.absoluteTime,
+              matchDateTimeComponents: DateTimeComponents.time,
+            );
+          }
+
+          tz.TZDateTime _nextInstanceOfTime(int hour, int minute) {
+            final tz.TZDateTime now = tz.TZDateTime.now(tz.local);
+            tz.TZDateTime scheduledDate =
+                tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
+            if (scheduledDate.isBefore(now)) {
+              scheduledDate = scheduledDate.add(const Duration(days: 1));
+            }
+            return scheduledDate;
+          }
+
+          class FamilyMealPlannerApp extends StatelessWidget {
+            const FamilyMealPlannerApp({super.key});
+
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'Family Meal Planner',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
+                home: const MainDashboard(),
+              );
+            }
+          }
+
+          class MainDashboard extends StatefulWidget {
+            const MainDashboard({super.key});
+            @override
+            State<MainDashboard> createState() => _MainDashboardState();
+          }
+
+          class _MainDashboardState extends State<MainDashboard> {
+            DateTime selectedDate = DateTime.now();
+            final List<String> members = ['Member 1', 'Member 2', 'Member 3', 'Member 4'];
+            final List<String> meals = ['Breakfast', 'Tiffin', 'Lunch', 'Dinner'];
+
+            Map<String, Map<String, bool>> defaults = {
+              'Member 1': {'Breakfast': true, 'Tiffin': true, 'Lunch': true, 'Dinner': false},
+              'Member 2': {'Breakfast': true, 'Tiffin': true, 'Lunch': true, 'Dinner': true},
+              'Member 3': {'Breakfast': true, 'Tiffin': false, 'Lunch': true, 'Dinner': true},
+              'Member 4': {'Breakfast': false, 'Tiffin': true, 'Lunch': true, 'Dinner': true},
+            };
+
+            Map<String, dynamic> explicitData = {};
+
+            @override
+            void initState() {
+              super.initState();
+              _loadPersistedData();
+            }
+
+            Future<void> _loadPersistedData() async {
+              final prefs = await SharedPreferences.getInstance();
+              final rawDefaults = prefs.getString('saved_defaults');
+              final rawExplicit = prefs.getString('saved_explicit');
+
+              if (rawDefaults != null) {
+                final Map<String, dynamic> decoded = jsonDecode(rawDefaults);
+                setState(() {
+                  defaults = decoded.map((k, v) => MapEntry(k, Map<String, bool>.from(v)));
+                });
+              }
+
+              if (rawExplicit != null) {
+                setState(() {
+                  explicitData = jsonDecode(rawExplicit);
+                });
+              }
+            }
+
+            Future<void> _persistExplicit() async {
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('saved_explicit', jsonEncode(explicitData));
+            }
+
+            String get dateKey => DateFormat('yyyy-MM-dd').format(selectedDate);
+
+            bool getEffectiveValue(String member, String meal) {
+              if (explicitData.containsKey(dateKey) &&
+                  explicitData[dateKey].containsKey(member) &&
+                  explicitData[dateKey][member].containsKey(meal)) {
+                return explicitData[dateKey][member][meal] as bool;
+              }
+              return defaults[member]?[meal] ?? false;
+            }
+
+            bool isExplicitlySet(String member, String meal) {
+              return explicitData.containsKey(dateKey) &&
+                  explicitData[dateKey].containsKey(member) &&
+                  explicitData[dateKey][member].containsKey(meal);
+            }
+
+            void setSelection(String member, String meal, bool value) {
+              setState(() {
+                explicitData.putIfAbsent(dateKey, () => {});
+                explicitData[dateKey].putIfAbsent(member, () => {});
+                explicitData[dateKey][member][meal] = value;
+              });
+              _persistExplicit();
+            }
+
+            void shareToWhatsApp() async {
+              final dateHeader = DateFormat('dd MMMM yyyy').format(selectedDate);
+              StringBuffer sb = StringBuffer();
+              sb.writeln("Family Meal Plan — $dateHeader\n");
+
+              for (var meal in meals) {
+                var yesList = members.where((m) => getEffectiveValue(m, meal)).toList();
+                String summary = yesList.length == members.length
+                    ? "Everyone"
+                    : (yesList.isEmpty ? "None" : yesList.join(", "));
+                sb.writeln("${meal.toUpperCase()}: ${yesList.length} Yes — $summary");
+              }
+
+              var declinedMembers = <String>[];
+              for (var m in members) {
+                for (var meal in meals) {
+                  if (isExplicitlySet(m, meal) && !getEffectiveValue(m, meal)) {
+                    declinedMembers.add("$m ($meal)");
+                  }
+                }
+              }
+              if (declinedMembers.isNotEmpty) {
+                sb.writeln("\nExplicitly Opted Out: ${declinedMembers.join(', ')}");
+              }
+
+              final uri = Uri.parse(
+                  "whatsapp://send?text=${Uri.encodeComponent(sb.toString())}");
+              if (await canLaunchUrl(uri)) {
+                await launchUrl(uri);
+              }
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(
+                  title: const Text('Family Meal Planner'),
+                  elevation: 2,
+                  actions: [
+                    IconButton(
+                      icon: const Icon(Icons.share),
+                      onPressed: shareToWhatsApp,
+                    ),
+                  ],
+                ),
+                body: Column(
+                  children: [
+                    Container(
+                      color: Colors.indigo.shade50,
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.chevron_left),
+                            onPressed: () => setState(() => selectedDate =
+                                selectedDate.subtract(const Duration(days: 1))),
+                          ),
+                          InkWell(
+                            onTap: () async {
+                              final picked = await showDatePicker(
+                                context: context,
+                                initialDate: selectedDate,
+                                firstDate: DateTime.now().subtract(const Duration(days: 90)),
+                                lastDate: DateTime.now().add(const Duration(days: 90)),
+                              );
+                              if (picked != null) setState(() => selectedDate = picked);
+                            },
+                            child: Row(
+                              children: [
+                                const Icon(Icons.calendar_today, size: 16),
+                                const SizedBox(width: 8),
+                                Text(
+                                  DateFormat('EEE, d MMM yyyy').format(selectedDate),
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.chevron_right),
+                            onPressed: () => setState(() =>
+                                selectedDate = selectedDate.add(const Duration(days: 1))),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        children: meals.map((meal) {
+                          int yesCount =
+                              members.where((m) => getEffectiveValue(m, meal)).length;
+                          return Card(
+                            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            elevation: 2,
+                            child: ExpansionTile(
+                              initiallyExpanded: true,
+                              title: Text(
+                                "$meal — $yesCount / ${members.length} Yes",
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              children: members.map((member) {
+                                bool isYes = getEffectiveValue(member, meal);
+                                bool isExplicit = isExplicitlySet(member, meal);
+
+                                return ListTile(
+                                  title: Text(member, style: const TextStyle(fontWeight: FontWeight.w600)),
+                                  subtitle: Text(
+                                    isExplicit ? "Explicit Choice" : "Default Preference",
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: isExplicit ? Colors.indigo : Colors.black54,
+                                    ),
+                                  ),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      ChoiceChip(
+                                        label: const Text("Yes"),
+                                        selected: isYes,
+                                        selectedColor: Colors.green.shade200,
+                                        onSelected: (_) => setSelection(member, meal, true),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      ChoiceChip(
+                                        label: const Text("No"),
+                                        selected: !isYes,
+                                        selectedColor: Colors.red.shade200,
+                                        onSelected: (_) => setSelection(member, meal, false),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+          }
+          EOF
+
+      - name: Build Android APK
+        run: flutter build apk --release --no-shrink
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FamilyMealPlanner-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
