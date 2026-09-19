@@ -21,10 +21,59 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Initialize Project & Lock Compatible Notification Version
+      - name: Initialize Project & Add Packages
         run: |
           flutter create --org com.family --project-name family_meal_planner .
           flutter pub add "flutter_local_notifications:^17.2.4" timezone intl url_launcher shared_preferences
+
+      - name: Configure Android Build
+        run: |
+          cat << 'EOF' > android/app/build.gradle
+          plugins {
+              id "com.android.application"
+              id "kotlin-android"
+              id "dev.flutter.flutter-gradle-plugin"
+          }
+
+          android {
+              namespace = "com.family.family_meal_planner"
+              compileSdk = 36
+              ndkVersion = flutter.ndkVersion
+
+              compileOptions {
+                  coreLibraryDesugaringEnabled true
+                  sourceCompatibility = JavaVersion.VERSION_1_8
+                  targetCompatibility = JavaVersion.VERSION_1_8
+              }
+
+              kotlinOptions {
+                  jvmTarget = "1.8"
+              }
+
+              defaultConfig {
+                  applicationId = "com.family.family_meal_planner"
+                  minSdk = 21
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "1.0.1"
+                  multiDexEnabled true
+              }
+
+              buildTypes {
+                  release {
+                      signingConfig = signingConfigs.debug
+                  }
+              }
+          }
+
+          dependencies {
+              coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+          }
+
+          flutter {
+              source = "../.."
+          }
+          EOF
 
       - name: Configure Android Manifest
         run: |
@@ -72,7 +121,7 @@ jobs:
           </manifest>
           EOF
 
-      - name: Write Compatible App Code
+      - name: Write Failsafe Application Code
         run: |
           cat << 'EOF' > lib/main.dart
           import 'dart:convert';
@@ -86,73 +135,9 @@ jobs:
 
           final FlutterLocalNotificationsPlugin localNotifs = FlutterLocalNotificationsPlugin();
 
-          void main() async {
+          void main() {
             WidgetsFlutterBinding.ensureInitialized();
-            tz.initializeTimeZones();
-            tz.setLocalLocation(tz.getLocation('Asia/Kolkata'));
-
-            const AndroidInitializationSettings androidSettings =
-                AndroidInitializationSettings('@mipmap/ic_launcher');
-            const InitializationSettings initSettings =
-                InitializationSettings(android: androidSettings);
-
-            await localNotifs.initialize(initSettings);
-            await scheduleDailyMealReminders();
-
             runApp(const FamilyMealPlannerApp());
-          }
-
-          Future<void> scheduleDailyMealReminders() async {
-            final androidImpl = localNotifs.resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin>();
-            if (androidImpl != null) {
-              await androidImpl.requestNotificationsPermission();
-              await androidImpl.requestExactAlarmsPermission();
-            }
-
-            const NotificationDetails notifDetails = NotificationDetails(
-              android: AndroidNotificationDetails(
-                'meal_reminders_id',
-                'Meal Reminders',
-                channelDescription: 'Daily 8:00 AM and 10:00 PM Meal Alarms',
-                importance: Importance.max,
-                priority: Priority.high,
-              ),
-            );
-
-            await localNotifs.zonedSchedule(
-              101,
-              'Breakfast Reminder (8:00 AM)',
-              'Remember to confirm if you want breakfast today!',
-              _nextInstanceOfTime(8, 0),
-              notifDetails,
-              androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-              uiLocalNotificationDateInterpretation:
-                  UILocalNotificationDateInterpretation.absoluteTime,
-              matchDateTimeComponents: DateTimeComponents.time,
-            );
-
-            await localNotifs.zonedSchedule(
-              102,
-              'Tiffin Reminder (10:00 PM)',
-              'Confirm your tiffin preference for tomorrow before bedtime!',
-              _nextInstanceOfTime(22, 0),
-              notifDetails,
-              androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-              uiLocalNotificationDateInterpretation:
-                  UILocalNotificationDateInterpretation.absoluteTime,
-              matchDateTimeComponents: DateTimeComponents.time,
-            );
-          }
-
-          tz.TZDateTime _nextInstanceOfTime(int hour, int minute) {
-            final tz.TZDateTime now = tz.TZDateTime.now(tz.local);
-            tz.TZDateTime scheduledDate =
-                tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
-            if (scheduledDate.isBefore(now)) {
-              scheduledDate = scheduledDate.add(const Duration(days: 1));
-            }
-            return scheduledDate;
           }
 
           class FamilyMealPlannerApp extends StatelessWidget {
@@ -163,7 +148,10 @@ jobs:
               return MaterialApp(
                 title: 'Family Meal Planner',
                 debugShowCheckedModeBanner: false,
-                theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
+                theme: ThemeData(
+                  useMaterial3: true,
+                  colorSchemeSeed: Colors.indigo,
+                ),
                 home: const MainDashboard(),
               );
             }
@@ -171,6 +159,7 @@ jobs:
 
           class MainDashboard extends StatefulWidget {
             const MainDashboard({super.key});
+
             @override
             State<MainDashboard> createState() => _MainDashboardState();
           }
@@ -193,30 +182,102 @@ jobs:
             void initState() {
               super.initState();
               _loadPersistedData();
+              _initNotificationsSafely();
+            }
+
+            Future<void> _initNotificationsSafely() async {
+              try {
+                tz.initializeTimeZones();
+                try {
+                  tz.setLocalLocation(tz.getLocation('Asia/Kolkata'));
+                } catch (_) {}
+
+                const AndroidInitializationSettings androidSettings =
+                    AndroidInitializationSettings('@mipmap/ic_launcher');
+                const InitializationSettings initSettings =
+                    InitializationSettings(android: androidSettings);
+
+                await localNotifs.initialize(initSettings);
+
+                final androidImpl = localNotifs.resolvePlatformSpecificImplementation<
+                    AndroidFlutterLocalNotificationsPlugin>();
+                if (androidImpl != null) {
+                  await androidImpl.requestNotificationsPermission();
+                  await androidImpl.requestExactAlarmsPermission();
+                }
+
+                const NotificationDetails notifDetails = NotificationDetails(
+                  android: AndroidNotificationDetails(
+                    'meal_reminders_id',
+                    'Meal Reminders',
+                    channelDescription: 'Daily 8:00 AM and 10:00 PM Meal Alarms',
+                    importance: Importance.max,
+                    priority: Priority.high,
+                  ),
+                );
+
+                await localNotifs.zonedSchedule(
+                  101,
+                  'Breakfast Reminder (8:00 AM)',
+                  'Remember to confirm if you want breakfast today!',
+                  _nextInstanceOfTime(8, 0),
+                  notifDetails,
+                  androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+                  uiLocalNotificationDateInterpretation:
+                      UILocalNotificationDateInterpretation.absoluteTime,
+                  matchDateTimeComponents: DateTimeComponents.time,
+                );
+
+                await localNotifs.zonedSchedule(
+                  102,
+                  'Tiffin Reminder (10:00 PM)',
+                  'Confirm your tiffin preference for tomorrow before bedtime!',
+                  _nextInstanceOfTime(22, 0),
+                  notifDetails,
+                  androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+                  uiLocalNotificationDateInterpretation:
+                      UILocalNotificationDateInterpretation.absoluteTime,
+                  matchDateTimeComponents: DateTimeComponents.time,
+                );
+              } catch (_) {}
+            }
+
+            tz.TZDateTime _nextInstanceOfTime(int hour, int minute) {
+              final tz.TZDateTime now = tz.TZDateTime.now(tz.local);
+              tz.TZDateTime scheduledDate =
+                  tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
+              if (scheduledDate.isBefore(now)) {
+                scheduledDate = scheduledDate.add(const Duration(days: 1));
+              }
+              return scheduledDate;
             }
 
             Future<void> _loadPersistedData() async {
-              final prefs = await SharedPreferences.getInstance();
-              final rawDefaults = prefs.getString('saved_defaults');
-              final rawExplicit = prefs.getString('saved_explicit');
+              try {
+                final prefs = await SharedPreferences.getInstance();
+                final rawDefaults = prefs.getString('saved_defaults');
+                final rawExplicit = prefs.getString('saved_explicit');
 
-              if (rawDefaults != null) {
-                final Map<String, dynamic> decoded = jsonDecode(rawDefaults);
-                setState(() {
-                  defaults = decoded.map((k, v) => MapEntry(k, Map<String, bool>.from(v)));
-                });
-              }
+                if (rawDefaults != null) {
+                  final Map<String, dynamic> decoded = jsonDecode(rawDefaults);
+                  setState(() {
+                    defaults = decoded.map((k, v) => MapEntry(k, Map<String, bool>.from(v)));
+                  });
+                }
 
-              if (rawExplicit != null) {
-                setState(() {
-                  explicitData = jsonDecode(rawExplicit);
-                });
-              }
+                if (rawExplicit != null) {
+                  setState(() {
+                    explicitData = jsonDecode(rawExplicit);
+                  });
+                }
+              } catch (_) {}
             }
 
             Future<void> _persistExplicit() async {
-              final prefs = await SharedPreferences.getInstance();
-              await prefs.setString('saved_explicit', jsonEncode(explicitData));
+              try {
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setString('saved_explicit', jsonEncode(explicitData));
+              } catch (_) {}
             }
 
             String get dateKey => DateFormat('yyyy-MM-dd').format(selectedDate);
@@ -239,6 +300,7 @@ jobs:
             void setSelection(String member, String meal, bool value) {
               setState(() {
                 explicitData.putIfAbsent(dateKey, () => {});
+                explicitData[dateKey].putIfAbsent(member, () => {});
                 explicitData[dateKey].putIfAbsent(member, () => {});
                 explicitData[dateKey][member][meal] = value;
               });
@@ -270,8 +332,7 @@ jobs:
                 sb.writeln("\nExplicitly Opted Out: ${declinedMembers.join(', ')}");
               }
 
-              final uri = Uri.parse(
-                  "whatsapp://send?text=${Uri.encodeComponent(sb.toString())}");
+              final uri = Uri.parse("whatsapp://send?text=${Uri.encodeComponent(sb.toString())}");
               if (await canLaunchUrl(uri)) {
                 await launchUrl(uri);
               }
@@ -286,6 +347,7 @@ jobs:
                   actions: [
                     IconButton(
                       icon: const Icon(Icons.share),
+                      tooltip: 'Share to WhatsApp',
                       onPressed: shareToWhatsApp,
                     ),
                   ],
